@@ -12,7 +12,6 @@ classdef PixelflyClass < handle
         %-----Timing settings-----%
         delayTime        = uint16(0);
         timeBaseDelay    = uint16(0);   % 0 = ns, 1 = us, 2 = ms
-        exposureTime     = uint16(137);
         timeBaseExposure = uint16(2);   % 0 = ns, 1 = us, 2 = ms
         
         %-----Camera settings (set by questionning the camera)-----%
@@ -39,21 +38,85 @@ classdef PixelflyClass < handle
         isCameraOpen     = 0;
         isCameraArmed    = 0;
         
+        %-----Settings to configure the listeners-----%
+        isRunning        = 0;
+        
         %-----Array to stock the pictures for the fluorescence/absorption imaging-----%
         tmp_array        = zeros(1392,4*1040);
+    end
+    
+    properties (SetObservable = true)
         imagingType;
+        exposureTime     = uint16(137);
     end
     
     methods
         
-        %********************************************************************************%
-        %* These methods are 'definitions' that will be call to prepare the acquisition *%
-        %********************************************************************************%
+        %*********************************************************%
+        %* These methods are 'definitions' of the Pixelfly class *%
+        %*********************************************************%
         
         %-----Constructor of the class-----%
         function obj = PixelflyClass ()
             obj = obj@handle;
+            
+            %-----Initialize listeners-----%
+            addlistener(obj,'imagingType','PostSet',@obj.PostsetImagingType);
         end
+        
+        function [] = PostsetImagingType(obj,~,~)
+            % The camera MUST BE turned off to modify its settings (except for the exposure time)
+            switch obj.isRunning
+                case 0
+                    %-----Set the imaging type parameters-----%
+                    switch obj.imagingType
+                        case 'absorption'
+                            obj.bufNumber = 2;
+                            
+                        case 'fluo_1pix'
+                            obj.bufNumber = 1;
+                            
+                        case 'fluo_tof'
+                            obj.bufNumber = 2;
+                            
+                        otherwise
+                            display('Unknown imaging type !');
+                    end
+                    
+                case 1
+                    % The camera MUST BE turned off first (except if the modified parameter is the exposure time)
+                    obj.StopAcquisition();
+                    
+                    %-----Set the imaging type parameters-----%
+                    switch obj.imagingType
+                        case 'absorption'
+                            obj.bufNumber = 2;
+                            
+                        case 'fluo_1pix'
+                            obj.bufNumber = 1;
+                            
+                        case 'fluo_tof'
+                            obj.bufNumber = 2;
+                            
+                        otherwise
+                            display('Unknown imaging type !');
+                    end
+                    
+                    % Reboot the camera with the new settings
+                    obj.StartAcquisition();
+                    
+                otherwise
+                    display('Unknown running state !');
+            end
+        end
+        
+        function [] = PostsetExposureTime(obj,~,~)
+            obj.SetTimings;
+        end
+        
+        %********************************************************************************%
+        %* These methods are 'definitions' that will be call to prepare the acquisition *%
+        %********************************************************************************%
         
         %-----InitializePixelfly method to declare/open the camera-----%
         function [] = InitializePixelfly(obj)     
@@ -371,6 +434,14 @@ classdef PixelflyClass < handle
                 end
             end
             
+            % Clear the PCO objects unload the library
+            obj.imageStack = [];
+            obj.sBufNr = [];
+            obj.imagePtr = [];
+            obj.eventPtr = [];
+            obj.ml_buflist_1 = [];
+            obj.buflist_1 = [];
+            
             if((obj.doUnloadLibrary == 1) && (obj.isCameraOpen == 0))
                 unloadlibrary('PCO_CAM_SDK');
                 obj.doUnloadLibrary = 0;
@@ -392,6 +463,8 @@ classdef PixelflyClass < handle
                 obj.AllocateBuffersMemory();
                 obj.ArmPixelfly();
                 obj.SetBufferQueue();
+                
+                obj.isRunning = 1;
             elseif ((obj.isCameraOpen == 1) && (obj.isCameraArmed == 0))
                 disp('Camera already open but not armed !');
                 disp('Skip the initialization step, go to the configuration steps');
@@ -400,6 +473,8 @@ classdef PixelflyClass < handle
                 obj.AllocateBuffersMemory();
                 obj.ArmPixelfly();
                 obj.SetBufferQueue();
+                
+                obj.isRunning = 1;
             else
                 disp('Camera already open and armed !');
                 disp('Camera should be dearmed/closed to change settings !');
@@ -429,7 +504,7 @@ classdef PixelflyClass < handle
                 
                 switch obj.imagingType
                     
-                    case 'Fluo_tof'
+                    case 'fluo_tof'
                         %-----Check the filling state of the buffers-----%
                         bufStates = zeros(1,obj.bufNumber);
                         for n=1:obj.bufNumber
@@ -517,7 +592,7 @@ classdef PixelflyClass < handle
                             display('Cannot operate on the buffers since at least one of them is empty !');
                         end
                     
-                    case 'Fluo_1pix'
+                    case 'fluo_1pix'
                         %disp('fluo 1 pix');
                         
                         for n=1:obj.bufNumber
@@ -562,13 +637,173 @@ classdef PixelflyClass < handle
                             end
                         end
                         
-                    case 'Abs'
-                        display('Imaging type : absorption');
+                    case 'absorption'
+                        %-----Check the filling state of the buffers-----%
+                        bufStates = zeros(1,obj.bufNumber);
+                        for n=1:obj.bufNumber
+                            
+                            [errorCode, obj.out_ptr, bufStatus, bufStatusDrv] = calllib('PCO_CAM_SDK', 'PCO_GetBufferStatus', obj.out_ptr, obj.sBufNr(n), bufStatus, bufStatusDrv);
+                            
+                            if(errorCode)
+                                pco_errdisp('GetBufferStatus -> failure ', errorCode);
+                            end
+                            
+                            disp(['dwStatusDll = ', num2str(bufStatus), '        dwStatusDrv = ', num2str(bufStatusDrv)]);
+                            
+                            if( (bufStatus == hex2dec(bufEmpty)) && (bufStatusDrv == 0) )
+                                disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> empty']);
+                                
+                            elseif( (bufStatus == hex2dec(bufFull)) && (bufStatusDrv == 0) )
+                                bufStates(1,n) = 1;
+                                disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> full']);
+                                
+                            elseif( (bufStatus == hex2dec(bufNeverFilled)) && (bufStatusDrv == 0) )
+                                disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> has never been filled']);
+                                
+                            else
+                                disp('Undefined error !');
+                                
+                            end
+                        end
+                        
+                        if(bufStates == ones(1,obj.bufNumber)) % If 2 buffers are full
+                            %-----Update the boolean initiating the communication with the treatement computer-----%
+                            isAcqDone = 1;
+                            
+                            for n=1:obj.bufNumber
+                                obj.buflist_1.sBufNr = obj.sBufNr(n);
+                                [errorCode, obj.out_ptr, obj.buflist_1] = calllib('PCO_CAM_SDK', 'PCO_WaitforBuffer', obj.out_ptr, 1, obj.buflist_1, bufWaitTime);
+                                if(errorCode)
+                                    pco_errdisp('Wait for buffer -> failure ', errorCode);
+                                end
+                                %-----Buffer is now ready except if an error occurred-----%
+                                
+                                %-----Take the picture(s)-----%
+                                % Some useful pieces of information :
+                                %   - if dwStatusDll = 00008000 -> buffer event is set
+                                %   - if dwStatusDrv = 0         -> no error occurred during the transfer
+                                
+                                if((bitand(obj.buflist_1.dwStatusDll,hex2dec('00008000')))&&(obj.buflist_1.dwStatusDrv==0))
+                                    %-----Copy the buffer data into the image stack-----%
+                                    [errorCode, obj.out_ptr, obj.imageStack(:,:,n)] = calllib('PCO_CAM_SDK', 'PCO_GetBuffer', obj.out_ptr, obj.sBufNr(n), obj.imagePtr(n), obj.eventPtr(n));
+                                    if(errorCode)
+                                        pco_errdisp('Get buffer -> failure ',errorCode);
+                                    end
+                                    obj.buflist_1.dwStatusDll = bitand(obj.buflist_1.dwStatusDll,hex2dec('FFFF7FFF'));
+                                    
+                                    %-----Save the pictures-----% 
+                                    if( mod(n,2) == 1 )
+                                        pic_at     = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                        pic_at_bg  = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                        
+                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at.mat'],'pic_at');
+                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at_bg.mat'],'pic_at_bg');
+                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
+                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
+
+                                    else
+                                        pic_wat    = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                        pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                        
+                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_wat.mat'],'pic_wat');
+                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
+                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat.mat'],'pic_wat');
+                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
+                                        
+                                    end
+                                    
+                                    %-----We add the already used buffer at the end of the driver queue for the next turn-----%
+                                    [errorCode, obj.out_ptr] = calllib('PCO_CAM_SDK','PCO_AddBufferEx', obj.out_ptr, 0, 0, obj.sBufNr(n), obj.xSize, obj.ySize, obj.bitPerPixel);
+                                    if(errorCode)
+                                        pco_errdisp('Add buffer after transfer -> failure ',errorCode);
+                                        break;
+                                    end
+                                end
+                            end
+                        
+                        else % If 0 or 1 buffer is full
+                            display('Cannot operate on the buffers since at least one of them is empty !');
+                        end
                         
                     otherwise
                         display('Unknown type of imaging type !');
                 end
 
+            else
+                disp('Error -> either camera not open and/or not armed !');
+            end
+        end
+        
+        function [] = ReadBuffers(obj,~,~)
+            if((obj.isCameraOpen == 1) && (obj.isCameraArmed == 1))
+                bufWaitTime = uint16(10); % check during 10 ms the buffer to know whether an image is ready to be transfered or not
+                
+                %-----Define the hexadecimal codes giving the buffer status-----%
+                bufEmpty       = 'E0000000';
+                bufFull        = 'E0008000';
+                bufNeverFilled = 0;
+                bufStatus      = uint16(10);
+                bufStatusDrv   = uint16(10);
+                
+                for n=1:obj.bufNumber
+                    obj.buflist_1.sBufNr = obj.sBufNr(n);
+                    [errorCode, obj.out_ptr, obj.buflist_1] = calllib('PCO_CAM_SDK', 'PCO_WaitforBuffer', obj.out_ptr, 1, obj.buflist_1, bufWaitTime);
+                    if(errorCode)
+                        pco_errdisp('Wait for buffer -> failure ', errorCode);
+                    end
+                    %-----Buffer is now ready except if an error occurred-----%
+                    
+                    %-----Take the picture(s)-----%
+                    % Some useful pieces of information :
+                    %   - if dwStatusDll = 00008000 -> buffer event is set
+                    %   - if dwStatusDrv = 0         -> no error occurred during the transfer
+                    
+                    if((bitand(obj.buflist_1.dwStatusDll,hex2dec('00008000')))&&(obj.buflist_1.dwStatusDrv==0))
+                        %-----Copy the buffer data into the image stack-----%
+                        [errorCode, obj.out_ptr, obj.imageStack(:,:,n)] = calllib('PCO_CAM_SDK', 'PCO_GetBuffer', obj.out_ptr, obj.sBufNr(n), obj.imagePtr(n), obj.eventPtr(n));
+                        if(errorCode)
+                            pco_errdisp('Get buffer -> failure ',errorCode);
+                        end
+                        obj.buflist_1.dwStatusDll = bitand(obj.buflist_1.dwStatusDll,hex2dec('FFFF7FFF'));
+                        
+                        %-----Read the pictures-----%
+                        switch obj.imagingType
+                            
+                            case 'fluo_tof'
+                                if( mod(n,2) == 1 )
+                                    pic_at     = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                    pic_at_bg  = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                else
+                                    pic_wat    = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                    pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                end
+                                
+                            case 'fluo_1pix'
+                                pic_at         = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                pic_at_bg      = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                
+                            case 'absorption'
+                                if( mod(n,2) == 1 )
+                                    pic_at     = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                    pic_at_bg  = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);                                  
+                                else
+                                    pic_wat    = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                    pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n); 
+                                end
+                                
+                            otherwise
+                                display('Unknown type of imaging type !');
+                        end
+                        
+                        %-----We add the already used buffer at the end of the driver queue for the next turn-----%
+                        [errorCode, obj.out_ptr] = calllib('PCO_CAM_SDK','PCO_AddBufferEx', obj.out_ptr, 0, 0, obj.sBufNr(n), obj.xSize, obj.ySize, obj.bitPerPixel);
+                        if(errorCode)
+                            pco_errdisp('Add buffer after transfer -> failure ',errorCode);
+                            break;
+                        end
+                    end
+                end
+                
             else
                 disp('Error -> either camera not open and/or not armed !');
             end
@@ -580,6 +815,9 @@ classdef PixelflyClass < handle
             if( (obj.doUnloadLibrary == 1) && (obj.isCameraOpen == 1) )
                 fprintf('\n');
                 disp('**********Close camera/Deallocate the memory**********');
+                
+                %-----Set the running state to 0-----%
+                obj.isRunning = 0;
                 
                 %-----Remove all pending buffers in the queue-----%
                 [errorCode] = calllib('PCO_CAM_SDK', 'PCO_CancelImages', obj.out_ptr);

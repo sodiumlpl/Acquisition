@@ -360,6 +360,8 @@ classdef Acquisition < handle
             
             obj.amg_lsb1_clb;
             
+            obj.amg_edt1_2_clb;
+            
             set(obj.amg.but1_2,'Enable','on');
             
             set(obj.amg.but1_1,'Enable','off');
@@ -383,6 +385,8 @@ classdef Acquisition < handle
                     
                     obj.running = 1;
                     
+                    obj.pixelfly.isRunning = 1;
+                    
                 case 1
                     
                     % stop camera
@@ -395,6 +399,8 @@ classdef Acquisition < handle
                     set(obj.amg.but1_3,'Enable','on');
                     
                     obj.running = 0;
+                    
+                    obj.pixelfly.isRunning = 0;
                     
             end
             
@@ -424,6 +430,9 @@ classdef Acquisition < handle
         
         function amg_edt1_2_clb(obj,~,~)
             
+            newExposureTime = get(obj.amg.edt1_2,'String');
+            
+            obj.pixelfly.exposureTime = str2double(newExposureTime);
         end
         
         function amg_popup1_3_clb(obj,~,~)
@@ -440,13 +449,24 @@ classdef Acquisition < handle
                 
                 case 'BEC008'
                     
-                    isAcqDone = obj.pixelfly.GetImages;
+                    message = strcat(message,'');
                     
-                    % pause(2.5);
-                    
-                    if( isAcqDone )
-                        disp('images ready');
-                        obj.net.send_message('main',message);
+                    switch message
+                        
+                        case 'stop-seq'
+                            obj.pixelfly.ReadBuffers();
+                            display('Camera buffers emptied !');
+                            
+                        otherwise
+                            isAcqDone = obj.pixelfly.GetImages;
+                            
+                            if( isAcqDone )
+                                disp('!!! images ready !!!');
+                                
+                                message = strcat('pixelfly-',obj.pixelfly.imagingType,'-',message);
+                                
+                                obj.net.send_message('main',message);
+                            end
                     end
                     
             end

@@ -43,8 +43,6 @@ classdef Network < handle
             
             message = fscanf(udp);
             
-            disp(message);
-            
             obj.parent.execute(udp.Name,message);
             
             disp(['Received message : ',message]);
