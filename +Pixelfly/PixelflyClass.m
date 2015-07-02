@@ -693,23 +693,22 @@ classdef PixelflyClass < handle
                                     
                                     %-----Save the pictures-----% 
                                     if( mod(n,2) == 1 )
-                                        pic_at     = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                        pic_at_bg  = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                        pic_at    = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                        pic_at_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
                                         
-                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at.mat'],'pic_at');
-                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at_bg.mat'],'pic_at_bg');
                                         save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
                                         save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
-
+                                        %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
+                                        %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat.mat'],'pic_wat');
+                                        
                                     else
                                         pic_wat    = obj.imageStack(:,1:(obj.ySize)/2,n);
                                         pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
                                         
-                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_wat.mat'],'pic_wat');
-                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
                                         save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat.mat'],'pic_wat');
                                         save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
-                                        
+                                        %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
+                                        %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
                                     end
                                     
                                     %-----We add the already used buffer at the end of the driver queue for the next turn-----%
