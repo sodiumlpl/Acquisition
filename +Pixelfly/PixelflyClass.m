@@ -2,7 +2,7 @@ classdef PixelflyClass < handle
     
     properties
         %-----Camera settings-----%
-        triggerMode      = uint16(2); % 0 = auto-trigger, 1 = software-trigger, 2 = external-trigger
+        triggerMode      = uint16(2); %  0 = auto-trigger, 1 = software-trigger, 2 = external-trigger
         dbShutterMode    = uint16(1); % 0 = no double shutter, 1 = double shutter
         recordingState   = uint16(0); % 0 = camera not recording, 1 = camera recording
         recorderSubmode  = uint16(1); % 1 = ringbuffer
@@ -43,11 +43,28 @@ classdef PixelflyClass < handle
         
         %-----Array to stock the pictures for the fluorescence/absorption imaging-----%
         tmp_array        = zeros(1392,4*1040);
+        
+        %-----Timer to get images-----%
+        imagesTimer
+        
+        seq_duration
+        
+        %-----Parent class of the Pixelfly Class-----%
+        parent
+        
+    end
+    
+    properties
+       
+        current_message
+        
     end
     
     properties (SetObservable = true)
+        
         imagingType;
         exposureTime     = uint16(137);
+        
     end
     
     methods
@@ -62,8 +79,17 @@ classdef PixelflyClass < handle
             
             %-----Initialize listeners-----%
             addlistener(obj,'imagingType','PostSet',@obj.PostsetImagingType);
+            
+            %-----Initialize timer-----%
+            
+            obj.imagesTimer = timer(...
+                'ExecutionMode','singleShot',...
+                'StartFcn',@obj.ImageTimerStartFcn,...
+                'TimerFcn',@obj.ImageTimerFcn,...
+                'StopFcn',@obj.ImageTimerStopFcn...
+                );
         end
-        
+ 
         function [] = PostsetImagingType(obj,~,~)
             % The camera MUST BE turned off to modify its settings (except for the exposure time)
             switch obj.isRunning
@@ -71,6 +97,9 @@ classdef PixelflyClass < handle
                     %-----Set the imaging type parameters-----%
                     switch obj.imagingType
                         case 'absorption'
+                            obj.bufNumber = 2;
+                            
+                        case 'clean_abs'
                             obj.bufNumber = 2;
                             
                         case 'fluo_1pix'
@@ -90,6 +119,9 @@ classdef PixelflyClass < handle
                     %-----Set the imaging type parameters-----%
                     switch obj.imagingType
                         case 'absorption'
+                            obj.bufNumber = 2;
+                            
+                        case 'clean_abs'
                             obj.bufNumber = 2;
                             
                         case 'fluo_1pix'
@@ -115,7 +147,7 @@ classdef PixelflyClass < handle
         end
         
         %********************************************************************************%
-        %* These methods are 'definitions' that will be call to prepare the acquisition *%
+        %* These methods are 'definitions' that will be called to prepare the acquisition *%
         %********************************************************************************%
         
         %-----InitializePixelfly method to declare/open the camera-----%
@@ -363,6 +395,7 @@ classdef PixelflyClass < handle
             
             obj.imagePtr = im_ptr;
             obj.eventPtr = ev_ptr;
+            
         end
         
         %-----Set buffer queue-----%
@@ -482,12 +515,11 @@ classdef PixelflyClass < handle
         end
         
         %-----Image acquisition-----%
-        function isAcqDone = GetImages(obj,~,~)
+        function ImageTimerStartFcn(obj,~,~)
+            
             if((obj.isCameraOpen == 1) && (obj.isCameraArmed == 1))
                 
-                isAcqDone = 0;
-                
-                bufWaitTime = uint16(10); % check during 10 ms the buffer to know whether an image is ready to be transfered or not
+                disp('**********Start pictures acquisition**********');
                 
                 %-----Define the hexadecimal codes giving the buffer status-----%
                 bufEmpty       = 'E0000000';
@@ -496,316 +528,299 @@ classdef PixelflyClass < handle
                 bufStatus      = uint16(10);
                 bufStatusDrv   = uint16(10);
                 
-                %***************************************
-                %***************************************
-                %***************************************
-                
-                %bufStates = zeros(1,obj.bufNumber);
-                
-                switch obj.imagingType
-                    
-                    case 'fluo_tof'
-                        %-----Check the filling state of the buffers-----%
-                        bufStates = zeros(1,obj.bufNumber);
-                        for n=1:obj.bufNumber
-                            
-                            [errorCode, obj.out_ptr, bufStatus, bufStatusDrv] = calllib('PCO_CAM_SDK', 'PCO_GetBufferStatus', obj.out_ptr, obj.sBufNr(n), bufStatus, bufStatusDrv);
-                            
-                            if(errorCode)
-                                pco_errdisp('GetBufferStatus -> failure ', errorCode);
-                            end
-                            
-                            disp(['dwStatusDll = ', num2str(bufStatus), '        dwStatusDrv = ', num2str(bufStatusDrv)]);
-                            
-                            if( (bufStatus == hex2dec(bufEmpty)) && (bufStatusDrv == 0) )
-                                disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> empty']);
-                                
-                            elseif( (bufStatus == hex2dec(bufFull)) && (bufStatusDrv == 0) )
-                                bufStates(1,n) = 1;
-                                disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> full']);
-                                
-                            elseif( (bufStatus == hex2dec(bufNeverFilled)) && (bufStatusDrv == 0) )
-                                disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> has never been filled']);
-                                
-                            else
-                                disp('Undefined error !');
-                                
-                            end
-                        end
-                        
-                        if(bufStates == ones(1,obj.bufNumber)) % If 2 buffers are full
-                            %-----Update the boolean initiating the communication with the treatement computer-----%
-                            isAcqDone = 1;
-                            
-                            for n=1:obj.bufNumber
-                                obj.buflist_1.sBufNr = obj.sBufNr(n);
-                                [errorCode, obj.out_ptr, obj.buflist_1] = calllib('PCO_CAM_SDK', 'PCO_WaitforBuffer', obj.out_ptr, 1, obj.buflist_1, bufWaitTime);
-                                if(errorCode)
-                                    pco_errdisp('Wait for buffer -> failure ', errorCode);
-                                end
-                                %-----Buffer is now ready except if an error occurred-----%
-                                
-                                %-----Take the picture(s)-----%
-                                % Some useful pieces of information :
-                                %   - if dwStatusDll = 00008000 -> buffer event is set
-                                %   - if dwStatusDrv = 0         -> no error occurred during the transfer
-                                
-                                if((bitand(obj.buflist_1.dwStatusDll,hex2dec('00008000')))&&(obj.buflist_1.dwStatusDrv==0))
-                                    %-----Copy the buffer data into the image stack-----%
-                                    [errorCode, obj.out_ptr, obj.imageStack(:,:,n)] = calllib('PCO_CAM_SDK', 'PCO_GetBuffer', obj.out_ptr, obj.sBufNr(n), obj.imagePtr(n), obj.eventPtr(n));
-                                    if(errorCode)
-                                        pco_errdisp('Get buffer -> failure ',errorCode);
-                                    end
-                                    obj.buflist_1.dwStatusDll = bitand(obj.buflist_1.dwStatusDll,hex2dec('FFFF7FFF'));
-                                    
-                                    %-----Save the pictures-----% 
-                                    if( mod(n,2) == 1 )
-                                        pic_at     = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                        pic_at_bg  = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
-                                        
-                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at.mat'],'pic_at');
-                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at_bg.mat'],'pic_at_bg');
-                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
-                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
-
-                                    else
-                                        pic_wat    = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                        pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
-                                        
-                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_wat.mat'],'pic_wat');
-                                        %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
-                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat.mat'],'pic_wat');
-                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
-                                        
-                                    end
-                                    
-                                    %-----We add the already used buffer at the end of the driver queue for the next turn-----%
-                                    [errorCode, obj.out_ptr] = calllib('PCO_CAM_SDK','PCO_AddBufferEx', obj.out_ptr, 0, 0, obj.sBufNr(n), obj.xSize, obj.ySize, obj.bitPerPixel);
-                                    if(errorCode)
-                                        pco_errdisp('Add buffer after transfer -> failure ',errorCode);
-                                        break;
-                                    end
-                                end
-                            end
-                        
-                        else % If 0 or 1 buffer is full
-                            display('Cannot operate on the buffers since at least one of them is empty !');
-                        end
-                    
-                    case 'fluo_1pix'
-                        %disp('fluo 1 pix');
-                        
-                        for n=1:obj.bufNumber
-                            obj.buflist_1.sBufNr = obj.sBufNr(n);
-                            [errorCode, obj.out_ptr, obj.buflist_1] = calllib('PCO_CAM_SDK', 'PCO_WaitforBuffer', obj.out_ptr, 1, obj.buflist_1, bufWaitTime);
-                            if(errorCode)
-                                pco_errdisp('Wait for buffer -> failure ', errorCode);
-                            end
-                            %-----Buffer is now ready except if an error occurred-----%
-                            
-                            %-----Take the picture(s)-----%
-                            % Some useful pieces of information :
-                            %   - if dwStatusDll = 00008000 -> buffer event is set
-                            %   - if dwStatusDrv = 0         -> no error occurred during the transfer
-                            
-                            if((bitand(obj.buflist_1.dwStatusDll,hex2dec('00008000')))&&(obj.buflist_1.dwStatusDrv==0))
-                                %-----Copy the buffer data into the image stack-----%
-                                [errorCode, obj.out_ptr, obj.imageStack(:,:,n)] = calllib('PCO_CAM_SDK', 'PCO_GetBuffer', obj.out_ptr, obj.sBufNr(n), obj.imagePtr(n), obj.eventPtr(n));
-                                if(errorCode)
-                                    pco_errdisp('Get buffer -> failure ',errorCode);
-                                end
-                                obj.buflist_1.dwStatusDll = bitand(obj.buflist_1.dwStatusDll,hex2dec('FFFF7FFF'));
-                                
-                                %-----Update the boolean initiating the communication with the treatement computer-----%
-                                isAcqDone = 1;
-                                
-                                %-----Save the pictures-----%
-                                pic_at    = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                pic_at_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
-                                
-                                %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at.mat'],'pic_at');
-                                %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at_bg.mat'],'pic_at_bg');
-                                save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
-                                save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
-                                
-                                %-----We add the already used buffer at the end of the driver queue for the next turn-----%
-                                [errorCode, obj.out_ptr] = calllib('PCO_CAM_SDK','PCO_AddBufferEx', obj.out_ptr, 0, 0, obj.sBufNr(n), obj.xSize, obj.ySize, obj.bitPerPixel);
-                                if(errorCode)
-                                    pco_errdisp('Add buffer after transfer -> failure ',errorCode);
-                                    break;
-                                end
-                            end
-                        end
-                        
-                    case 'absorption'
-                        %-----Check the filling state of the buffers-----%
-                        bufStates = zeros(1,obj.bufNumber);
-                        for n=1:obj.bufNumber
-                            
-                            [errorCode, obj.out_ptr, bufStatus, bufStatusDrv] = calllib('PCO_CAM_SDK', 'PCO_GetBufferStatus', obj.out_ptr, obj.sBufNr(n), bufStatus, bufStatusDrv);
-                            
-                            if(errorCode)
-                                pco_errdisp('GetBufferStatus -> failure ', errorCode);
-                            end
-                            
-                            disp(['dwStatusDll = ', num2str(bufStatus), '        dwStatusDrv = ', num2str(bufStatusDrv)]);
-                            
-                            if( (bufStatus == hex2dec(bufEmpty)) && (bufStatusDrv == 0) )
-                                disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> empty']);
-                                
-                            elseif( (bufStatus == hex2dec(bufFull)) && (bufStatusDrv == 0) )
-                                bufStates(1,n) = 1;
-                                disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> full']);
-                                
-                            elseif( (bufStatus == hex2dec(bufNeverFilled)) && (bufStatusDrv == 0) )
-                                disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> has never been filled']);
-                                
-                            else
-                                disp('Undefined error !');
-                                
-                            end
-                        end
-                        
-                        if(bufStates == ones(1,obj.bufNumber)) % If 2 buffers are full
-                            %-----Update the boolean initiating the communication with the treatement computer-----%
-                            isAcqDone = 1;
-                            
-                            for n=1:obj.bufNumber
-                                obj.buflist_1.sBufNr = obj.sBufNr(n);
-                                [errorCode, obj.out_ptr, obj.buflist_1] = calllib('PCO_CAM_SDK', 'PCO_WaitforBuffer', obj.out_ptr, 1, obj.buflist_1, bufWaitTime);
-                                if(errorCode)
-                                    pco_errdisp('Wait for buffer -> failure ', errorCode);
-                                end
-                                %-----Buffer is now ready except if an error occurred-----%
-                                
-                                %-----Take the picture(s)-----%
-                                % Some useful pieces of information :
-                                %   - if dwStatusDll = 00008000 -> buffer event is set
-                                %   - if dwStatusDrv = 0         -> no error occurred during the transfer
-                                
-                                if((bitand(obj.buflist_1.dwStatusDll,hex2dec('00008000')))&&(obj.buflist_1.dwStatusDrv==0))
-                                    %-----Copy the buffer data into the image stack-----%
-                                    [errorCode, obj.out_ptr, obj.imageStack(:,:,n)] = calllib('PCO_CAM_SDK', 'PCO_GetBuffer', obj.out_ptr, obj.sBufNr(n), obj.imagePtr(n), obj.eventPtr(n));
-                                    if(errorCode)
-                                        pco_errdisp('Get buffer -> failure ',errorCode);
-                                    end
-                                    obj.buflist_1.dwStatusDll = bitand(obj.buflist_1.dwStatusDll,hex2dec('FFFF7FFF'));
-                                    
-                                    %-----Save the pictures-----% 
-                                    if( mod(n,2) == 1 )
-                                        pic_at    = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                        pic_at_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
-                                        
-                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
-                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
-                                        %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
-                                        %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat.mat'],'pic_wat');
-                                        
-                                    else
-                                        pic_wat    = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                        pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
-                                        
-                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat.mat'],'pic_wat');
-                                        save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
-                                        %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
-                                        %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
-                                    end
-                                    
-                                    %-----We add the already used buffer at the end of the driver queue for the next turn-----%
-                                    [errorCode, obj.out_ptr] = calllib('PCO_CAM_SDK','PCO_AddBufferEx', obj.out_ptr, 0, 0, obj.sBufNr(n), obj.xSize, obj.ySize, obj.bitPerPixel);
-                                    if(errorCode)
-                                        pco_errdisp('Add buffer after transfer -> failure ',errorCode);
-                                        break;
-                                    end
-                                end
-                            end
-                        
-                        else % If 0 or 1 buffer is full
-                            display('Cannot operate on the buffers since at least one of them is empty !');
-                        end
-                        
-                    otherwise
-                        display('Unknown type of imaging type !');
-                end
-
-            else
-                disp('Error -> either camera not open and/or not armed !');
-            end
-        end
-        
-        function [] = ReadBuffers(obj,~,~)
-            if((obj.isCameraOpen == 1) && (obj.isCameraArmed == 1))
-                bufWaitTime = uint16(10); % check during 10 ms the buffer to know whether an image is ready to be transfered or not
-                
-                %-----Define the hexadecimal codes giving the buffer status-----%
-                bufEmpty       = 'E0000000';
-                bufFull        = 'E0008000';
-                bufNeverFilled = 0;
-                bufStatus      = uint16(10);
-                bufStatusDrv   = uint16(10);
-                
+                %-----Check the filling state of the buffers-----%
                 for n=1:obj.bufNumber
-                    obj.buflist_1.sBufNr = obj.sBufNr(n);
-                    [errorCode, obj.out_ptr, obj.buflist_1] = calllib('PCO_CAM_SDK', 'PCO_WaitforBuffer', obj.out_ptr, 1, obj.buflist_1, bufWaitTime);
+                    
+                    [errorCode, obj.out_ptr, bufStatus, bufStatusDrv] = calllib('PCO_CAM_SDK', 'PCO_GetBufferStatus', obj.out_ptr, obj.sBufNr(n), bufStatus, bufStatusDrv);
+                    
                     if(errorCode)
-                        pco_errdisp('Wait for buffer -> failure ', errorCode);
+                        pco_errdisp('GetBufferStatus -> failure ', errorCode);
                     end
-                    %-----Buffer is now ready except if an error occurred-----%
                     
-                    %-----Take the picture(s)-----%
-                    % Some useful pieces of information :
-                    %   - if dwStatusDll = 00008000 -> buffer event is set
-                    %   - if dwStatusDrv = 0         -> no error occurred during the transfer
+                    disp(['dwStatusDll = ', num2str(bufStatus), '        dwStatusDrv = ', num2str(bufStatusDrv)]);
                     
-                    if((bitand(obj.buflist_1.dwStatusDll,hex2dec('00008000')))&&(obj.buflist_1.dwStatusDrv==0))
-                        %-----Copy the buffer data into the image stack-----%
-                        [errorCode, obj.out_ptr, obj.imageStack(:,:,n)] = calllib('PCO_CAM_SDK', 'PCO_GetBuffer', obj.out_ptr, obj.sBufNr(n), obj.imagePtr(n), obj.eventPtr(n));
-                        if(errorCode)
-                            pco_errdisp('Get buffer -> failure ',errorCode);
-                        end
-                        obj.buflist_1.dwStatusDll = bitand(obj.buflist_1.dwStatusDll,hex2dec('FFFF7FFF'));
+                    if( (bufStatus == hex2dec(bufEmpty)) && (bufStatusDrv == 0) )
+                        disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> empty']);
                         
-                        %-----Read the pictures-----%
-                        switch obj.imagingType
-                            
-                            case 'fluo_tof'
-                                if( mod(n,2) == 1 )
-                                    pic_at     = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                    pic_at_bg  = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
-                                else
-                                    pic_wat    = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                    pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
-                                end
-                                
-                            case 'fluo_1pix'
-                                pic_at         = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                pic_at_bg      = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
-                                
-                            case 'absorption'
-                                if( mod(n,2) == 1 )
-                                    pic_at     = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                    pic_at_bg  = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);                                  
-                                else
-                                    pic_wat    = obj.imageStack(:,1:(obj.ySize)/2,n);
-                                    pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n); 
-                                end
-                                
-                            otherwise
-                                display('Unknown type of imaging type !');
-                        end
+                    elseif( (bufStatus == hex2dec(bufFull)) && (bufStatusDrv == 0) )
+                        disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> full']);
                         
-                        %-----We add the already used buffer at the end of the driver queue for the next turn-----%
                         [errorCode, obj.out_ptr] = calllib('PCO_CAM_SDK','PCO_AddBufferEx', obj.out_ptr, 0, 0, obj.sBufNr(n), obj.xSize, obj.ySize, obj.bitPerPixel);
                         if(errorCode)
                             pco_errdisp('Add buffer after transfer -> failure ',errorCode);
                             break;
                         end
+                        
+                        disp(['Buffer #', num2str(obj.sBufNr(n)), ' has been emptied !']);
+                        
+                    elseif( (bufStatus == hex2dec(bufNeverFilled)) && (bufStatusDrv == 0) )
+                        disp(['Buffer #', num2str(obj.sBufNr(n)), '           -> has never been filled']);
+                        
+                    else
+                        disp('Undefined error !');
+                        
                     end
                 end
                 
             else
                 disp('Error -> either camera not open and/or not armed !');
+                
+                stop(obj.imagesTimer)
+                
             end
+            
+        end
+        
+        function ImageTimerFcn(obj,~,~)
+            
+            bufWaitTime = uint16(obj.seq_duration*1000); % timeout to check if the pictures are ready
+            
+            getImagesBool = true;
+            
+            switch obj.imagingType
+                
+                case 'fluo_tof'
+                    
+                    for n=1:obj.bufNumber
+                        obj.buflist_1.sBufNr = obj.sBufNr(n);
+                        [errorCode, obj.out_ptr, obj.buflist_1] = calllib('PCO_CAM_SDK', 'PCO_WaitforBuffer', obj.out_ptr, 1, obj.buflist_1, bufWaitTime);
+                        if(errorCode)
+                            pco_errdisp('Wait for buffer -> failure ', errorCode);
+                            
+                            getImagesBool = false;
+                        end
+                        
+                        disp(['Image waiting in Buffer #', num2str(obj.sBufNr(n))]);
+                        
+                        %-----Buffer is now ready except if an error occurred-----%
+                        
+                        %-----Take the picture(s)-----%
+                        % Some useful pieces of information :
+                        %   - if dwStatusDll = 00008000 -> buffer event is set
+                        %   - if dwStatusDrv = 0         -> no error occurred during the transfer
+                        
+                        if((bitand(obj.buflist_1.dwStatusDll,hex2dec('00008000')))&&(obj.buflist_1.dwStatusDrv==0))
+                            %-----Copy the buffer data into the image stack-----%
+                            [errorCode, obj.out_ptr, obj.imageStack(:,:,n)] = calllib('PCO_CAM_SDK', 'PCO_GetBuffer', obj.out_ptr, obj.sBufNr(n), obj.imagePtr(n), obj.eventPtr(n));
+                            if(errorCode)
+                                pco_errdisp('Get buffer -> failure ',errorCode);
+                            end
+                            obj.buflist_1.dwStatusDll = bitand(obj.buflist_1.dwStatusDll,hex2dec('FFFF7FFF'));
+                            
+                            %-----Save the pictures-----%
+                            if( mod(n,2) == 1 )
+                                pic_at     = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                pic_at_bg  = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                
+                                %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at.mat'],'pic_at');
+                                %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at_bg.mat'],'pic_at_bg');
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
+                                
+                            else
+                                pic_wat    = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                
+                                %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_wat.mat'],'pic_wat');
+                                %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_wat.mat'],'pic_wat');
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
+                                
+                            end
+                            
+                            disp('Image read and saved');
+                            
+                            %-----We add the already used buffer at the end of the driver queue for the next turn-----%
+                            [errorCode, obj.out_ptr] = calllib('PCO_CAM_SDK','PCO_AddBufferEx', obj.out_ptr, 0, 0, obj.sBufNr(n), obj.xSize, obj.ySize, obj.bitPerPixel);
+                            if(errorCode)
+                                pco_errdisp('Add buffer after transfer -> failure ',errorCode);
+                                break;
+                            end
+                        end
+                    end
+                    
+                case 'fluo_1pix'
+                    
+                    for n=1:obj.bufNumber
+                        obj.buflist_1.sBufNr = obj.sBufNr(n);
+                        [errorCode, obj.out_ptr, obj.buflist_1] = calllib('PCO_CAM_SDK', 'PCO_WaitforBuffer', obj.out_ptr, 1, obj.buflist_1, bufWaitTime);
+                        if(errorCode)
+                            pco_errdisp('Wait for buffer -> failure ', errorCode);
+                            
+                            getImagesBool = false;
+                        end
+                        
+                        disp(['Image waiting in Buffer #', num2str(obj.sBufNr(n))]);
+                        
+                        %-----Buffer is now ready except if an error occurred-----%
+                        
+                        %-----Take the picture(s)-----%
+                        % Some useful pieces of information :
+                        %   - if dwStatusDll = 00008000 -> buffer event is set
+                        %   - if dwStatusDrv = 0         -> no error occurred during the transfer
+                        
+                        if((bitand(obj.buflist_1.dwStatusDll,hex2dec('00008000')))&&(obj.buflist_1.dwStatusDrv==0))
+                            %-----Copy the buffer data into the image stack-----%
+                            [errorCode, obj.out_ptr, obj.imageStack(:,:,n)] = calllib('PCO_CAM_SDK', 'PCO_GetBuffer', obj.out_ptr, obj.sBufNr(n), obj.imagePtr(n), obj.eventPtr(n));
+                            if(errorCode)
+                                pco_errdisp('Get buffer -> failure ',errorCode);
+                            end
+                            obj.buflist_1.dwStatusDll = bitand(obj.buflist_1.dwStatusDll,hex2dec('FFFF7FFF'));
+                            
+                            %-----Update the boolean initiating the communication with the treatement computer-----%
+                            isAcqDone = 1;
+                            
+                            %-----Save the pictures-----%
+                            pic_at    = obj.imageStack(:,1:(obj.ySize)/2,n);
+                            pic_at_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                            
+                            %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at.mat'],'pic_at');
+                            %save(['C:\Users\BEC\Documents\data\pixelfly\','pic_at_bg.mat'],'pic_at_bg');
+                            save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
+                            save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
+                            
+                            disp('Image read and saved');
+                            
+                            %-----We add the already used buffer at the end of the driver queue for the next turn-----%
+                            [errorCode, obj.out_ptr] = calllib('PCO_CAM_SDK','PCO_AddBufferEx', obj.out_ptr, 0, 0, obj.sBufNr(n), obj.xSize, obj.ySize, obj.bitPerPixel);
+                            if(errorCode)
+                                pco_errdisp('Add buffer after transfer -> failure ',errorCode);
+                                break;
+                            end
+                        end
+                    end
+                    
+                case 'absorption'
+                    
+                    for n=1:obj.bufNumber
+                        obj.buflist_1.sBufNr = obj.sBufNr(n);
+                        [errorCode, obj.out_ptr, obj.buflist_1] = calllib('PCO_CAM_SDK', 'PCO_WaitforBuffer', obj.out_ptr, 1, obj.buflist_1, bufWaitTime);
+                        if(errorCode)
+                            pco_errdisp('Wait for buffer -> failure ', errorCode);
+                            
+                            getImagesBool = false;
+                        end
+                        
+                        disp(['Image waiting in Buffer #', num2str(obj.sBufNr(n))]);
+                        
+                        %-----Buffer is now ready except if an error occurred-----%
+                        
+                        %-----Take the picture(s)-----%
+                        % Some useful pieces of information :
+                        %   - if dwStatusDll = 00008000 -> buffer event is set
+                        %   - if dwStatusDrv = 0         -> no error occurred during the transfer
+                        
+                        if((bitand(obj.buflist_1.dwStatusDll,hex2dec('00008000')))&&(obj.buflist_1.dwStatusDrv==0))
+                            %-----Copy the buffer data into the image stack-----%
+                            [errorCode, obj.out_ptr, obj.imageStack(:,:,n)] = calllib('PCO_CAM_SDK', 'PCO_GetBuffer', obj.out_ptr, obj.sBufNr(n), obj.imagePtr(n), obj.eventPtr(n));
+                            if(errorCode)
+                                pco_errdisp('Get buffer -> failure ',errorCode);
+                            end
+                            obj.buflist_1.dwStatusDll = bitand(obj.buflist_1.dwStatusDll,hex2dec('FFFF7FFF'));
+                            
+                            %-----Save the pictures-----%
+                            if( mod(n,2) == 1 )
+                                pic_at    = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                pic_at_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
+                                %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
+                                %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat.mat'],'pic_wat');
+                                
+                            else
+                                pic_wat    = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_wat.mat'],'pic_wat');
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
+                                %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
+                                %save(['\\TIBO-HP\Data\Tmp\Pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
+                            end
+                            
+                            disp('Image read and saved');
+                            
+                            %-----We add the already used buffer at the end of the driver queue for the next turn-----%
+                            [errorCode, obj.out_ptr] = calllib('PCO_CAM_SDK','PCO_AddBufferEx', obj.out_ptr, 0, 0, obj.sBufNr(n), obj.xSize, obj.ySize, obj.bitPerPixel);
+                            if(errorCode)
+                                pco_errdisp('Add buffer after transfer -> failure ',errorCode);
+                                break;
+                            end
+                        end
+                    end
+                    
+                case 'clean_abs'
+                    
+                    for n=1:obj.bufNumber
+                        obj.buflist_1.sBufNr = obj.sBufNr(n);
+                        [errorCode, obj.out_ptr, obj.buflist_1] = calllib('PCO_CAM_SDK', 'PCO_WaitforBuffer', obj.out_ptr, 1, obj.buflist_1, bufWaitTime);
+                        if(errorCode)
+                            pco_errdisp('Wait for buffer -> failure ', errorCode);
+                            
+                            getImagesBool = false;
+                        end
+                        
+                        disp(['Image waiting in Buffer #', num2str(obj.sBufNr(n))]);
+                        
+                        %-----Buffer is now ready except if an error occurred-----%
+                        
+                        %-----Take the picture(s)-----%
+                        % Some useful pieces of information :
+                        %   - if dwStatusDll = 00008000 -> buffer event is set
+                        %   - if dwStatusDrv = 0         -> no error occurred during the transfer
+                        
+                        if((bitand(obj.buflist_1.dwStatusDll,hex2dec('00008000')))&&(obj.buflist_1.dwStatusDrv==0))
+                            %-----Copy the buffer data into the image stack-----%
+                            [errorCode, obj.out_ptr, obj.imageStack(:,:,n)] = calllib('PCO_CAM_SDK', 'PCO_GetBuffer', obj.out_ptr, obj.sBufNr(n), obj.imagePtr(n), obj.eventPtr(n));
+                            if(errorCode)
+                                pco_errdisp('Get buffer -> failure ',errorCode);
+                            end
+                            obj.buflist_1.dwStatusDll = bitand(obj.buflist_1.dwStatusDll,hex2dec('FFFF7FFF'));
+                            
+                            %-----Save the pictures-----%
+                            if( mod(n,2) == 1 )
+                                pic_at  = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                pic_wat = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_at.mat'],'pic_at');
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_wat.mat'],'pic_wat');
+                            else
+                                pic_at_bg    = obj.imageStack(:,1:(obj.ySize)/2,n);
+                                pic_wat_bg = obj.imageStack(:,(1+(obj.ySize)/2):(obj.ySize),n);
+                                
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_at_bg.mat'],'pic_at_bg');
+                                save(['\\E010-BEC-PC03\Data\Tmp\Pixelfly\','pic_wat_bg.mat'],'pic_wat_bg');
+                            end
+                            
+                            disp('Image read and saved');
+                            
+                            %-----We add the already used buffer at the end of the driver queue for the next turn-----%
+                            [errorCode, obj.out_ptr] = calllib('PCO_CAM_SDK','PCO_AddBufferEx', obj.out_ptr, 0, 0, obj.sBufNr(n), obj.xSize, obj.ySize, obj.bitPerPixel);
+                            if(errorCode)
+                                pco_errdisp('Add buffer after transfer -> failure ',errorCode);
+                                break;
+                            end
+                        end
+                    end
+                    
+                otherwise
+                    display('Unknown type of imaging type !');
+            end
+            
+            %-----Send Network message-----%
+            
+            if getImagesBool
+                
+                obj.parent.net.send_message('main',obj.current_message);
+                
+            end
+            
+        end
+        
+        function ImageTimerStopFcn(~,~,~)
+            
+            disp('**********Pictures acquisition ended**********');
+            
         end
         
         %-----Stop the camera-----%
@@ -878,6 +893,7 @@ classdef PixelflyClass < handle
                 disp('Error -> either library not loaded and/or camera is not open');
             end
         end
+        
     end
     
 end

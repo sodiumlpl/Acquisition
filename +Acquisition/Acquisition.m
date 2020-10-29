@@ -13,6 +13,8 @@ classdef Acquisition < handle
         
         pixelfly;
         
+        current_message;
+        
     end
     
     properties
@@ -352,11 +354,15 @@ classdef Acquisition < handle
                 ,'Callback'             ,@obj.amg_edt1_4_clb ...
                 );
             
+            
+            
         end
         
         function init_cam(obj,~,~)
             
             obj.pixelfly = Pixelfly.PixelflyClass();
+            
+            obj.pixelfly.parent = obj;
             
             obj.amg_lsb1_clb;
             
@@ -451,22 +457,24 @@ classdef Acquisition < handle
                     
                     message = strcat(message,'');
                     
-                    switch message
+                    str_cell = strsplit(message,'-');
+                    
+                    switch str_cell{1}
                         
-                        case 'stop-seq'
-                            obj.pixelfly.ReadBuffers();
-                            display('Camera buffers emptied !');
+                        case 'stop'
+                            
+                            stop(obj.pixelfly.imagesTimer)
+                            
+                        case 'seq_duration'
+                            
+                            obj.pixelfly.seq_duration = str2double(str_cell{2});
                             
                         otherwise
-                            isAcqDone = obj.pixelfly.GetImages;
                             
-                            if( isAcqDone )
-                                disp('!!! images ready !!!');
-                                
-                                message = strcat('pixelfly-',obj.pixelfly.imagingType,'-',message);
-                                
-                                obj.net.send_message('main',message);
-                            end
+                            obj.current_message = strcat('pixelfly-',obj.pixelfly.imagingType,'-',message);
+                            
+                            start(obj.pixelfly.imagesTimer)
+                            
                     end
                     
             end
